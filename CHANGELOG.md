@@ -11,6 +11,8 @@ cores, 24 threads), JDK 25, 3 GB heap, MC 26.3-pre-1, seed
 force-loaded at once after two warm-up sets; the flight is 60 strips
 of 2x21 chunks at one per second.
 
+## [Unreleased]
+
 ## [0.1.0-alpha] - 2026-09-19
 
 ### Changed
@@ -202,3 +204,6 @@ of 2x21 chunks at one per second.
 - `-Dpainite.lod`: the far view works but stays off. Distant Horizons
   covers the same need; the code is kept for the record format and
   the client store.
+
+[Unreleased]: https://github.com/VoiceLessQ/Painite/compare/v0.1.0-alpha...HEAD
+[0.1.0-alpha]: https://github.com/VoiceLessQ/Painite/releases/tag/v0.1.0-alpha
