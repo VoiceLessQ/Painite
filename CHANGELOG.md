@@ -13,6 +13,12 @@ of 2x21 chunks at one per second.
 
 ## [Unreleased]
 
+### Changed
+
+- Licence is now GPL-3.0-only instead of MIT. Modified builds and
+  mods built on Painite's code must publish their source. The Ferrite
+  code in rust/terrain keeps its MIT notice.
+
 ## [0.1.0-alpha] - 2026-09-19
 
 ### Changed

@@ -4,7 +4,7 @@
 	"version": "${version}",
 	"name": "Painite",
 	"description": "Parallel chunk generation for Minecraft: the stages vanilla runs one at a time run side by side, with exclusive write zones keeping output stable.",
-	"license": "MIT",
+	"license": "GPL-3.0-only",
 	"authors": [
 		"NoZeroG"
 	],

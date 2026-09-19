@@ -1,5 +1,8 @@
 # Third-Party Licenses
 
+Painite itself is GPL-3.0-only (see LICENSE). The parts below keep
+their own licence.
+
 ## Ferrite
 
 The noise, PRNG, density function and climate code in rust/terrain is

@@ -98,6 +98,8 @@ to find it.
 
 ## License
 
-MIT. The noise and density code started from
-[Ferrite](https://github.com/VoiceLessQ/Ferrite), also MIT. Details in
-LICENSES.md.
+GPL-3.0-only. If you distribute a modified Painite, or a mod built on
+its code, the source of that mod has to be public under the same
+licence. The noise and density code started from
+[Ferrite](https://github.com/VoiceLessQ/Ferrite), which is MIT; its
+notice is in LICENSES.md.
