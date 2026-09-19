@@ -1,0 +1,66 @@
+# gradle
+
+.gradle/
+build/
+out/
+classes/
+
+# eclipse
+
+*.launch
+
+# idea
+
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# vscode
+
+.settings/
+.vscode/
+bin/
+.classpath
+.project
+
+# macos
+
+*.DS_Store
+
+# fabric
+
+run/
+
+# java
+
+hs_err_*.log
+replay_*.log
+*.hprof
+*.jfr
+
+# rust
+target/
+__pycache__/
+
+# DLL staged into resources by copyRustDll at build time
+src/main/resources/assets/painite/natives/
+
+# release/build artifacts at repo root
+/*.zip
+/*.tar.gz
+
+# built jars (Gradle output) — kept explicit in case build/ pattern changes
+*.jar
+
+# windows
+Thumbs.db
+
+# runClient log directory — populated each dev session, never committed
+logs/
+
+
+# extracted Mojang source (reference reading only)
+/26.1.2/
+/1.21.11/
+

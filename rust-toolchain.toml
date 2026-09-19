@@ -1,0 +1,7 @@
+[toolchain]
+# Stable is enough: painite-sched and the cdylib use no nightly features.
+# Ferrite pins nightly only for its api/macros crates, which Painite does
+# not depend on.
+channel = "stable"
+targets = ["x86_64-pc-windows-gnu", "x86_64-unknown-linux-gnu"]
+components = ["rust-analyzer", "rust-src", "clippy"]

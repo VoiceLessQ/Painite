@@ -1,0 +1,14 @@
+[package]
+name = "painite"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+painite-sched = { path = "../sched" }
+painite-terrain = { path = "../terrain" }
+serde_json = "1.0"
+jni = "0.21.1"

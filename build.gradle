@@ -1,0 +1,162 @@
+plugins {
+	id 'dev.architectury.loom' version '1.14-SNAPSHOT'
+}
+
+version = project.mod_version
+group = project.maven_group
+
+base {
+	archivesName = project.archives_base_name
+}
+
+repositories {
+	mavenLocal()
+	maven { url = 'https://maven.neoforged.net/releases' }
+	maven { url = 'https://maven.architectury.dev/' }
+}
+
+// Host-native target selection, used by the run configs and the
+// buildRustLib/copyRustDll tasks below.
+def hostOs = org.gradle.internal.os.OperatingSystem.current()
+def nativeTarget
+def nativeLibName
+def nativeOsDir
+if (hostOs.isWindows()) {
+	nativeTarget = 'x86_64-pc-windows-gnu'
+	nativeLibName = 'painite.dll'
+	nativeOsDir = 'windows'
+} else if (hostOs.isLinux()) {
+	def hostArch = System.getProperty("os.arch", "").toLowerCase()
+	if (hostArch.contains("aarch64") || hostArch.contains("arm64")) {
+		nativeTarget = 'aarch64-unknown-linux-gnu'
+		nativeLibName = 'libpainite.so'
+		nativeOsDir = 'linux-aarch64'
+	} else {
+		nativeTarget = 'x86_64-unknown-linux-gnu'
+		nativeLibName = 'libpainite.so'
+		nativeOsDir = 'linux'
+	}
+} else if (hostOs.isMacOsX()) {
+	nativeTarget = 'aarch64-apple-darwin'
+	nativeLibName = 'libpainite.dylib'
+	nativeOsDir = 'macos'
+} else {
+	throw new GradleException("Unsupported host OS for Rust native build: ${hostOs}")
+}
+
+def rustLibPath = "target/${nativeTarget}/release/${nativeLibName}"
+def nativesDir = "src/main/resources/assets/painite/natives/${nativeOsDir}"
+
+loom {
+	mods {
+		"painite" {
+			sourceSet sourceSets.main
+		}
+	}
+
+	runs {
+		configureEach {
+			def rustLibDir = file("target/${nativeTarget}/release").absolutePath
+			vmArg "-Djava.library.path=${rustLibDir}"
+			// Low-end default so GC pressure resembles 8 GB laptops.
+			def heapMax = project.findProperty("painite.heap") ?: "3G"
+			vmArg "-Xmx${heapMax}"
+			vmArg "-Xms512M"
+			// Feature flags pass through as given: -Ppainite.rustTerrain=false
+			// turns a default-on flag off, -Ppainite.rustOres=true a default-off one on.
+			for (flag in ['parallelFeatures', 'parallelStructures', 'rustTerrain', 'rustOres', 'oreShadow', 'fastPack', 'oreProbe', 'featureProbe', 'lod', 'frameProbe', 'lodDraw']) {
+				def value = project.findProperty("painite.${flag}")?.toString()
+				if (value == "true" || value == "false") {
+					vmArg "-Dpainite.${flag}=${value}"
+				}
+			}
+			// -Ppainite.vmArgs="-XX:+UseParallelGC" passes extra JVM flags, space separated.
+			if (project.hasProperty("painite.vmArgs")) {
+				project.property("painite.vmArgs").toString().split(" ").each { vmArg it }
+			}
+			// -Ppainite.quickPlay=<save name> opens that singleplayer world on client start.
+			if (project.hasProperty("painite.quickPlay")) {
+				programArgs "--quickPlaySingleplayer", project.property("painite.quickPlay").toString()
+			}
+			// -Ppainite.quickPlayServer=host:port joins that server on client start.
+			if (project.hasProperty("painite.quickPlayServer")) {
+				programArgs "--quickPlayMultiplayer", project.property("painite.quickPlayServer").toString()
+				programArgs "--username", "PainiteDev"
+			}
+			if (project.hasProperty("painite.workers")) {
+				vmArg "-Dpainite.workers=${project.property('painite.workers')}"
+			}
+			// -Ppainite.jfr=<file> records the whole run with the profile settings.
+			if (project.hasProperty("painite.jfr")) {
+				def jfrOpts = project.findProperty("painite.jfrOpts") ?: ""
+				vmArg "-XX:StartFlightRecording=filename=${project.property('painite.jfr')},settings=profile${jfrOpts}"
+			}
+		}
+	}
+}
+
+dependencies {
+	minecraft "net.minecraft:minecraft:${project.minecraft_version}"
+	// No mappings line: with fabric.loom.disableObfuscation=true the jar is
+	// already in named (mojmap) form. Plain implementation for the same reason.
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+}
+
+// Rust native build + bundle into jar. Host-aware: one native per local
+// build, CI assembles all platforms (see .github/workflows/build.yml).
+// Skip with `./gradlew build -x buildRustLib -x copyRustDll`.
+tasks.register('buildRustLib', Exec) {
+	group = 'rust'
+	description = "Builds the Rust native library for ${nativeTarget}."
+	workingDir = projectDir
+	commandLine 'cargo', 'build', '--release', '--target', nativeTarget, '--manifest-path=rust/mod/Cargo.toml'
+}
+
+tasks.register('copyRustDll', Copy) {
+	group = 'rust'
+	description = "Copies the built Rust native into main resources/${nativeOsDir}/."
+	dependsOn tasks.named('buildRustLib')
+	from rustLibPath
+	into nativesDir
+}
+
+processResources {
+	dependsOn tasks.named('copyRustDll')
+	inputs.property "version", project.version
+	filesMatching("fabric.mod.json") {
+		expand "version": project.version
+	}
+}
+
+afterEvaluate {
+	def sourcesJar = tasks.findByName('sourcesJar')
+	if (sourcesJar != null) {
+		sourcesJar.dependsOn(tasks.named('copyRustDll'))
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	withSourcesJar()
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	manifest {
+		def gitHash = "unknown"
+		try {
+			def p = ["git", "rev-parse", "--short", "HEAD"].execute(null, projectDir)
+			if (p.waitFor() == 0) gitHash = p.text.trim()
+		} catch (ignored) {}
+		attributes(
+			"Implementation-Version": "${project.version}",
+			"Painite-Build-Commit": gitHash,
+			"Painite-Build-Time": new Date().format("yyyy-MM-dd'T'HH:mm:ssXX", TimeZone.getTimeZone("UTC"))
+		)
+	}
+}

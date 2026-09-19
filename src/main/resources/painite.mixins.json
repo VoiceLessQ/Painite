@@ -1,0 +1,31 @@
+{
+	"required": true,
+	"package": "me.apika.painite.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"mixins": [
+		"BeardifierAccessor",
+		"ChunkGeneratorMixin",
+		"ChunkMapMixin",
+		"ChunkStatusTasksMixin",
+		"ChunkStepMixin",
+		"ChunkTaskDispatcherMixin",
+		"NoiseBasedChunkGeneratorMixin",
+		"NoiseChunkMixin",
+		"OreFeatureMixin",
+		"PalettedContainerMixin",
+		"SerializableChunkDataMixin",
+		"ThreadedLevelLightEngineMixin",
+		"WorldGenRegionMixin",
+		"WorldgenRandomMixin"
+	],
+	"client": [
+		"client.CameraMixin",
+		"client.ClientPacketListenerAccessor",
+		"client.LevelRendererMixin",
+		"client.FogRendererMixin",
+		"client.SpriteContentsAccessor"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	}
+}

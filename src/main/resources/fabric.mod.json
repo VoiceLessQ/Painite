@@ -1,0 +1,32 @@
+{
+	"schemaVersion": 1,
+	"id": "painite",
+	"version": "${version}",
+	"name": "Painite",
+	"description": "Parallel chunk generation for Minecraft: the stages vanilla runs one at a time run side by side, with exclusive write zones keeping output stable.",
+	"license": "MIT",
+	"authors": [
+		"NoZeroG"
+	],
+	"contact": {
+		"sources": "https://github.com/VoiceLessQ/Painite"
+	},
+	"environment": "*",
+	"entrypoints": {
+		"main": [
+			"me.apika.painite.PainiteMod"
+		],
+		"client": [
+			"me.apika.painite.PainiteClient"
+		]
+	},
+	"mixins": [
+		"painite.mixins.json"
+	],
+	"depends": {
+		"fabricloader": ">=0.18.4",
+		"minecraft": ">=26.3- <26.4",
+		"java": ">=25",
+		"fabric-api": "*"
+	}
+}

@@ -1,0 +1,748 @@
+//! Bit-exact Rust port of vanilla Minecraft 1.21.11's
+//! `Xoroshiro128PlusPlus`, `XoroshiroRandomSource`, and
+//! `XoroshiroPositionalRandomFactory`.
+//!
+//! Source files (mojmap, in `26.1.2/server/net/minecraft/`):
+//!   - `world/level/levelgen/Xoroshiro128PlusPlus.java`
+//!   - `world/level/levelgen/XoroshiroRandomSource.java`
+//!   - `world/level/levelgen/RandomSupport.java`
+//!   - `util/Mth.java` (getSeed)
+//!
+//! This module is pure math — no JNI, no global state. Every function
+//! is a direct translation of vanilla's. The intent is that
+//! `XoroshiroPositionalRandomFactory::new(seed_lo, seed_hi).at(x, y, z).next_float()`
+//! returns IDENTICAL values to vanilla, byte-for-byte.
+//!
+//! # Why this exists
+//!
+//! Two problems, one port:
+//!
+//! 1. Surface-rule `OP_VERT_GRADIENT` (bedrock floor + deepslate
+//!    transition) currently uses a midpoint-cutoff placeholder in the
+//!    Rust evaluator (`surface.rs:216`). Validator measures Java=Rust
+//!    at 97.5% because of this. With a correct Xoroshiro Rust port,
+//!    the evaluator can do the per-block PRNG roll and match Java
+//!    100%.
+//!
+//! 2. Track B of the surface dispatcher: instead of reflecting per-
+//!    column noise/random/biome state from the JVM, Rust will compute
+//!    everything from the world's seed once at world load. Xoroshiro
+//!    is the foundation — every other deterministic noise/random
+//!    sampler in vanilla wraps `Xoroshiro128PlusPlus`.
+//!
+//! # Subtleties
+//!
+//! - Java's `>>>` is unsigned right shift. Rust uses `u64` arithmetic
+//!   for the same effect, then casts back to i64 where needed for
+//!   parity with Java's signed long return type. `nextLong` returns
+//!   `i64` to match vanilla; clients that want `u64` can cast.
+//! - `rotateLeft(value, bits)` in Java preserves all bits — Rust's
+//!   `u64::rotate_left` is equivalent.
+//! - `mixStafford13` uses two specific magic constants
+//!   (`-4658895280553007687` and `-7723592293110705685`) — Java
+//!   negative literals; Rust needs the unsigned bit pattern via
+//!   `i64::wrapping_mul` or `u64` arithmetic. We keep everything
+//!   in `i64` to mirror vanilla exactly (signed multiply is
+//!   wrapping in two's complement, which is what we want).
+//! - `Mth.getSeed(x, y, z)` does signed integer multiplications
+//!   that overflow in Java by design. Rust uses `wrapping_mul`
+//!   on `i64` to preserve the wrap.
+
+// ============================================================================
+// Constants from vanilla RandomSupport
+// ============================================================================
+
+/// Vanilla `RandomSupport.GOLDEN_RATIO_64` (Java literal `-7046029254386353131L`).
+pub const GOLDEN_RATIO_64: i64 = -7046029254386353131_i64;
+/// Vanilla `RandomSupport.SILVER_RATIO_64` (Java literal `7640891576956012809L`).
+pub const SILVER_RATIO_64: i64 = 7640891576956012809_i64;
+
+/// Vanilla `XoroshiroRandomSource.FLOAT_UNIT` = `5.9604645e-8f` =
+/// `1.0f / (1 << 24)`. Used by `next_float`.
+const FLOAT_UNIT_F32: f32 = 5.9604645e-8_f32;
+/// Vanilla `XoroshiroRandomSource.DOUBLE_UNIT` = `1.110223e-16f` (note:
+/// declared as `float` in vanilla but used as double — matches IEEE exactly
+/// for `1.0 / (1 << 53)`).
+const DOUBLE_UNIT_F32: f32 = 1.110223e-16_f32;
+
+// ============================================================================
+// Mixing primitives
+// ============================================================================
+
+/// Vanilla `RandomSupport.mixStafford13(long z)` — three rounds of
+/// xor-shift-multiply. Used to scramble a raw long seed before feeding
+/// into Xoroshiro.
+#[inline]
+pub fn mix_stafford_13(z: i64) -> i64 {
+    let z = (z ^ ((z as u64 >> 30) as i64)).wrapping_mul(-4658895280553007687_i64);
+    let z = (z ^ ((z as u64 >> 27) as i64)).wrapping_mul(-7723592293110705685_i64);
+    z ^ ((z as u64 >> 31) as i64)
+}
+
+/// Vanilla `RandomSupport.upgradeSeedTo128bitUnmixed(long legacySeed)`.
+#[inline]
+pub fn upgrade_seed_to_128bit_unmixed(legacy_seed: i64) -> (i64, i64) {
+    let lo = legacy_seed ^ SILVER_RATIO_64;
+    let hi = lo.wrapping_add(GOLDEN_RATIO_64);
+    (lo, hi)
+}
+
+/// Vanilla `RandomSupport.upgradeSeedTo128bit(long legacySeed)` —
+/// unmixed then mixStafford13'd in both halves.
+#[inline]
+pub fn upgrade_seed_to_128bit(legacy_seed: i64) -> (i64, i64) {
+    let (lo, hi) = upgrade_seed_to_128bit_unmixed(legacy_seed);
+    (mix_stafford_13(lo), mix_stafford_13(hi))
+}
+
+/// Vanilla `Mth.getSeed(int x, int y, int z)` — derives a per-position
+/// long seed. Used by `PositionalRandomFactory.at(x, y, z)`.
+///
+/// Vanilla's literal computation:
+/// ```text
+/// long seed = (long)(x * 3129871) ^ (long)z * 116129781L ^ (long)y;
+/// seed = seed * seed * 42317861L + seed * 11L;
+/// return seed >> 16;
+/// ```
+///
+/// Note: `x * 3129871` is an `int * int` multiply in Java, which
+/// overflows to `int` THEN is sign-extended to `long`. Rust must mirror
+/// that: do the multiply as `i32::wrapping_mul`, then cast.
+#[inline]
+pub fn get_seed(x: i32, y: i32, z: i32) -> i64 {
+    let xs: i64 = (x.wrapping_mul(3129871) as i64) ^ ((z as i64).wrapping_mul(116129781)) ^ (y as i64);
+    let mixed = xs.wrapping_mul(xs).wrapping_mul(42317861).wrapping_add(xs.wrapping_mul(11));
+    mixed >> 16
+}
+
+// ============================================================================
+// Xoroshiro128PlusPlus — the core PRNG
+// ============================================================================
+
+/// Direct port of vanilla's `Xoroshiro128PlusPlus`. Holds two i64 seeds
+/// and advances them on every `next_long` call. Mutable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Xoroshiro128PlusPlus {
+    pub seed_lo: i64,
+    pub seed_hi: i64,
+}
+
+impl Xoroshiro128PlusPlus {
+    /// Vanilla constructor: zero-zero seed is replaced by the golden+silver
+    /// constants (otherwise xoroshiro would emit zeros forever).
+    pub fn new(mut seed_lo: i64, mut seed_hi: i64) -> Self {
+        if (seed_lo | seed_hi) == 0 {
+            seed_lo = GOLDEN_RATIO_64;
+            seed_hi = SILVER_RATIO_64;
+        }
+        Self { seed_lo, seed_hi }
+    }
+
+    /// Vanilla `nextLong()`. Bit-exact with the Java implementation:
+    /// ```text
+    /// long s0 = seedLo, s1 = seedHi;
+    /// long result = Long.rotateLeft(s0 + s1, 17) + s0;
+    /// s1 ^= s0;
+    /// seedLo = Long.rotateLeft(s0, 49) ^ s1 ^ (s1 << 21);
+    /// seedHi = Long.rotateLeft(s1, 28);
+    /// return result;
+    /// ```
+    #[inline]
+    pub fn next_long(&mut self) -> i64 {
+        let s0 = self.seed_lo;
+        let s1 = self.seed_hi;
+        let sum = s0.wrapping_add(s1);
+        // i64 rotate is sign-preserving in Java; we go through u64 to mirror
+        // bit-for-bit.
+        let result = (sum as u64).rotate_left(17) as i64;
+        let result = result.wrapping_add(s0);
+
+        let s1_xor_s0 = s1 ^ s0;
+        let new_lo = ((s0 as u64).rotate_left(49) as i64) ^ s1_xor_s0 ^ (s1_xor_s0.wrapping_shl(21));
+        let new_hi = (s1_xor_s0 as u64).rotate_left(28) as i64;
+        self.seed_lo = new_lo;
+        self.seed_hi = new_hi;
+        result
+    }
+}
+
+// ============================================================================
+// XoroshiroRandomSource — Random-style API on top of the PRNG
+// ============================================================================
+
+/// Direct port of vanilla's `XoroshiroRandomSource`. Wraps
+/// `Xoroshiro128PlusPlus` with the convenience methods vanilla rules
+/// call (`nextFloat`, `nextDouble`, `nextInt`, etc.).
+///
+/// The Gaussian source from vanilla (`MarsagliaPolarGaussian`) is NOT
+/// ported here — surface rules don't use it. Add later if a downstream
+/// use needs it.
+#[derive(Clone, Copy, Debug)]
+pub struct XoroshiroRandomSource {
+    pub generator: Xoroshiro128PlusPlus,
+}
+
+impl XoroshiroRandomSource {
+    /// Vanilla `XoroshiroRandomSource(long seed)`: upgrades the legacy
+    /// 64-bit seed via `upgradeSeedTo128bit` (golden+silver xor +
+    /// mixStafford13).
+    pub fn from_legacy_seed(legacy_seed: i64) -> Self {
+        let (lo, hi) = upgrade_seed_to_128bit(legacy_seed);
+        Self { generator: Xoroshiro128PlusPlus::new(lo, hi) }
+    }
+
+    /// Vanilla `XoroshiroRandomSource(long seedLo, long seedHi)`.
+    /// Used by `XoroshiroPositionalRandomFactory.at` after the
+    /// per-position seed mixing.
+    pub fn from_pair(seed_lo: i64, seed_hi: i64) -> Self {
+        Self { generator: Xoroshiro128PlusPlus::new(seed_lo, seed_hi) }
+    }
+
+    /// Vanilla `nextLong()` — passthrough.
+    #[inline]
+    pub fn next_long(&mut self) -> i64 {
+        self.generator.next_long()
+    }
+
+    /// Vanilla `nextInt()` — `(int) nextLong()` (truncates the high 32 bits).
+    #[inline]
+    pub fn next_int(&mut self) -> i32 {
+        self.next_long() as i32
+    }
+
+    /// Vanilla `nextInt(int bound)` — Lemire-style unbiased bounded
+    /// integer using a 32x32→64 unsigned multiply and rejection on
+    /// the fractional part. Bit-exact with vanilla's
+    /// `XoroshiroRandomSource.nextInt(int)`.
+    ///
+    /// Panics if `bound <= 0` (matches Java's `IllegalArgumentException`).
+    #[inline]
+    pub fn next_int_bounded(&mut self, bound: i32) -> i32 {
+        assert!(bound > 0, "Bound must be positive");
+        let bound_u = bound as u32 as u64; // zero-extend
+        let mut random_bits = (self.next_int() as u32) as u64;
+        let mut multiplied = random_bits.wrapping_mul(bound_u);
+        let mut fractional = multiplied & 0xFFFF_FFFF;
+        if fractional < bound_u {
+            // Integer.remainderUnsigned(~bound + 1, bound) — bound is positive,
+            // so ~bound + 1 == -bound (two's complement). Treated as unsigned.
+            let neg_bound_u = (!(bound as u32)).wrapping_add(1) as u64;
+            let unbiased_start = neg_bound_u % bound_u;
+            while fractional < unbiased_start {
+                random_bits = (self.next_int() as u32) as u64;
+                multiplied = random_bits.wrapping_mul(bound_u);
+                fractional = multiplied & 0xFFFF_FFFF;
+            }
+        }
+        (multiplied >> 32) as i32
+    }
+
+    /// Vanilla `nextBoolean()` — `(nextLong() & 1) != 0`.
+    #[inline]
+    pub fn next_boolean(&mut self) -> bool {
+        (self.next_long() & 1) != 0
+    }
+
+    /// Vanilla `nextBits(int bits)`: `nextLong() >>> (64 - bits)`.
+    /// Java's `>>>` is unsigned shift; we use u64.
+    #[inline]
+    pub fn next_bits(&mut self, bits: u32) -> i64 {
+        let raw = self.next_long() as u64;
+        (raw >> (64 - bits)) as i64
+    }
+
+    /// Vanilla `nextFloat()` — `(float) nextBits(24) * 5.9604645E-8F`.
+    /// This is the call OP_VERT_GRADIENT uses for per-block PRNG.
+    #[inline]
+    pub fn next_float(&mut self) -> f32 {
+        (self.next_bits(24) as f32) * FLOAT_UNIT_F32
+    }
+
+    /// Vanilla `nextDouble()` — `(double) nextBits(53) * 1.110223E-16F`.
+    /// Note: vanilla declares the constant as `float` (loses precision)
+    /// then promotes to double — this is a vanilla quirk; we mirror it.
+    #[inline]
+    pub fn next_double(&mut self) -> f64 {
+        (self.next_bits(53) as f64) * (DOUBLE_UNIT_F32 as f64)
+    }
+
+    /// Vanilla `consumeCount(int rounds)` — discard N PRNG outputs.
+    /// Used by `PerlinNoise` legacy init to skip 262 longs per missing
+    /// octave (matching what `new ImprovedNoise(random)` would have
+    /// drawn: 3 doubles + 256 nextInt calls + slack).
+    #[inline]
+    pub fn consume_count(&mut self, rounds: u32) {
+        for _ in 0..rounds {
+            self.generator.next_long();
+        }
+    }
+
+    /// Vanilla `forkPositional()` — draws two longs to seed a new
+    /// `XoroshiroPositionalRandomFactory`.
+    #[inline]
+    pub fn fork_positional(&mut self) -> XoroshiroPositionalRandomFactory {
+        let lo = self.next_long();
+        let hi = self.next_long();
+        XoroshiroPositionalRandomFactory::new(lo, hi)
+    }
+}
+
+// ============================================================================
+// XoroshiroPositionalRandomFactory — per-position random derivation
+// ============================================================================
+
+/// Direct port of vanilla's `XoroshiroPositionalRandomFactory`. Holds
+/// two i64 "factory seeds" derived from the world seed, and produces a
+/// `XoroshiroRandomSource` deterministically for any (x, y, z).
+///
+/// This is the core primitive vanilla uses for per-block randomness:
+/// `OP_VERT_GRADIENT` calls `factory.at(x, y, z).nextFloat()` for the
+/// bedrock-floor and deepslate-transition probability roll.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct XoroshiroPositionalRandomFactory {
+    pub seed_lo: i64,
+    pub seed_hi: i64,
+}
+
+impl XoroshiroPositionalRandomFactory {
+    pub fn new(seed_lo: i64, seed_hi: i64) -> Self {
+        Self { seed_lo, seed_hi }
+    }
+
+    /// Vanilla `at(x, y, z)`:
+    /// ```text
+    /// long positionalSeed = Mth.getSeed(x, y, z);
+    /// long randomSeed = positionalSeed ^ this.seedLo;
+    /// return new XoroshiroRandomSource(randomSeed, this.seedHi);
+    /// ```
+    #[inline]
+    pub fn at(&self, x: i32, y: i32, z: i32) -> XoroshiroRandomSource {
+        let positional_seed = get_seed(x, y, z);
+        let random_seed = positional_seed ^ self.seed_lo;
+        XoroshiroRandomSource::from_pair(random_seed, self.seed_hi)
+    }
+
+    /// Vanilla `fromHashOf(String name)`:
+    /// ```text
+    /// Seed128bit seed = RandomSupport.seedFromHashOf(name);
+    /// return new XoroshiroRandomSource(seed.xor(this.seedLo, this.seedHi));
+    /// ```
+    /// MD5 the UTF-8 bytes of `name`; first 8 bytes are seedLo, next 8
+    /// are seedHi — both decoded big-endian (Guava `Longs.fromBytes`).
+    /// Then XOR against the factory's stored (seedLo, seedHi) pair.
+    #[inline]
+    pub fn from_hash_of(&self, name: &str) -> XoroshiroRandomSource {
+        let (hash_lo, hash_hi) = seed_from_hash_of(name);
+        XoroshiroRandomSource::from_pair(hash_lo ^ self.seed_lo, hash_hi ^ self.seed_hi)
+    }
+
+    /// Vanilla `fromSeed(long seed)`:
+    /// ```text
+    /// return new XoroshiroRandomSource(seed ^ this.seedLo, seed ^ this.seedHi);
+    /// ```
+    #[inline]
+    pub fn from_seed(&self, seed: i64) -> XoroshiroRandomSource {
+        XoroshiroRandomSource::from_pair(seed ^ self.seed_lo, seed ^ self.seed_hi)
+    }
+}
+
+/// Vanilla `RandomSupport.seedFromHashOf(name)`:
+/// MD5 of the UTF-8 bytes; first 8 bytes → seedLo (big-endian),
+/// next 8 → seedHi (big-endian). Bit-exact with Guava's
+/// `Longs.fromBytes(b0, b1, ..., b7)`.
+pub fn seed_from_hash_of(name: &str) -> (i64, i64) {
+    use md5::{Digest, Md5};
+    let digest = Md5::digest(name.as_bytes());
+    let lo = i64::from_be_bytes(digest[0..8].try_into().unwrap());
+    let hi = i64::from_be_bytes(digest[8..16].try_into().unwrap());
+    (lo, hi)
+}
+
+// ============================================================================
+// LegacyRandomSource (java.util.Random LCG)
+// ============================================================================
+
+/// Bit-exact port of vanilla `LegacyRandomSource` (java.util.Random LCG).
+/// Used by `EndIslandDensityFunction` and a handful of other vanilla
+/// systems that pre-date the Xoroshiro switch.  Single-threaded only:
+/// vanilla's CAS+ThreadingDetector dance is replaced by plain mutation.
+pub struct LegacyRandomSource {
+    seed: i64,
+}
+
+const LEGACY_MULTIPLIER: i64 = 0x5_DEEC_E66D_i64;
+const LEGACY_INCREMENT: i64 = 0xB_i64;
+const LEGACY_MASK: i64 = (1_i64 << 48) - 1;
+
+impl LegacyRandomSource {
+    pub fn new(seed: i64) -> Self {
+        let mut r = Self { seed: 0 };
+        r.set_seed(seed);
+        r
+    }
+
+    pub fn set_seed(&mut self, seed: i64) {
+        self.seed = (seed ^ LEGACY_MULTIPLIER) & LEGACY_MASK;
+    }
+
+    /// Vanilla `next(bits)`.  Returns the high `bits` bits of the
+    /// post-step LCG seed.
+    pub fn next(&mut self, bits: i32) -> i32 {
+        let new_seed = self.seed.wrapping_mul(LEGACY_MULTIPLIER)
+            .wrapping_add(LEGACY_INCREMENT) & LEGACY_MASK;
+        self.seed = new_seed;
+        ((new_seed as u64) >> (48 - bits)) as i32
+    }
+
+    /// `BitRandomSource.nextInt(int)` — power-of-two fast path + the
+    /// rejection-sampling loop for general bounds.
+    pub fn next_int_bound(&mut self, bound: i32) -> i32 {
+        assert!(bound > 0, "bound must be positive");
+        if bound & (bound - 1) == 0 {
+            return ((bound as i64).wrapping_mul(self.next(31) as i64) >> 31) as i32;
+        }
+        loop {
+            let sample = self.next(31);
+            let modulo = sample % bound;
+            if sample - modulo + (bound - 1) >= 0 {
+                return modulo;
+            }
+        }
+    }
+
+    /// `BitRandomSource.nextInt()` — full 32-bit signed.
+    pub fn next_int(&mut self) -> i32 { self.next(32) }
+
+    /// `BitRandomSource.nextLong()`: two `next(32)` calls, high word first.
+    pub fn next_long(&mut self) -> i64 {
+        let upper = self.next(32) as i64;
+        let lower = self.next(32) as i64;
+        (upper << 32).wrapping_add(lower)
+    }
+
+    /// `BitRandomSource.nextFloat()`: 24 bits scaled by 2^-24.
+    pub fn next_float(&mut self) -> f32 {
+        self.next(24) as f32 * 5.960_464_5e-8_f32
+    }
+
+    /// `WorldgenRandom.setLargeFeatureSeed`: the carver seeding per source chunk.
+    pub fn set_large_feature_seed(&mut self, seed: i64, chunk_x: i32, chunk_z: i32) {
+        self.set_seed(seed);
+        let x_scale = self.next_long();
+        let z_scale = self.next_long();
+        self.set_seed((chunk_x as i64).wrapping_mul(x_scale) ^ (chunk_z as i64).wrapping_mul(z_scale) ^ seed);
+    }
+
+    /// `BitRandomSource.nextDouble()` — 53-bit mantissa from two next() calls.
+    pub fn next_double(&mut self) -> f64 {
+        let upper = self.next(26) as i64;
+        let lower = self.next(27) as i64;
+        // Vanilla's DOUBLE_MULTIPLIER is declared `float` but used as
+        // double — IEEE round-trip preserves the value 1/2^53.
+        let combined = (upper << 27) + lower;
+        combined as f64 * 1.110_223_e-16_f32 as f64
+    }
+
+    /// `RandomSource.consumeCount(rounds)` — calls next(32) `rounds`
+    /// times, no return.  Vanilla uses this to skip portions of the
+    /// stream (notably 17292 rounds for `EndIslandDensityFunction`).
+    pub fn consume_count(&mut self, rounds: i32) {
+        for _ in 0..rounds { self.next_int(); }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sanity: zero-zero seed gets replaced by golden+silver constants.
+    #[test]
+    fn zero_seed_is_replaced() {
+        let r = Xoroshiro128PlusPlus::new(0, 0);
+        assert_eq!(r.seed_lo, GOLDEN_RATIO_64);
+        assert_eq!(r.seed_hi, SILVER_RATIO_64);
+    }
+
+    /// Non-zero seed is preserved as-is.
+    #[test]
+    fn nonzero_seed_passes_through() {
+        let r = Xoroshiro128PlusPlus::new(1, 2);
+        assert_eq!(r.seed_lo, 1);
+        assert_eq!(r.seed_hi, 2);
+    }
+
+    /// Hand-traced: with seed (1, 2), nextLong should compute
+    ///   sum = 3
+    ///   result = rotateLeft(3, 17) + 1 = (3 << 17) + 1 = 393216 + 1 = 393217
+    /// Then mutates seedLo/seedHi for next call.
+    #[test]
+    fn next_long_first_call_with_known_seed() {
+        let mut r = Xoroshiro128PlusPlus::new(1, 2);
+        let v = r.next_long();
+        assert_eq!(v, 393217, "first nextLong with seed (1, 2) should be 393217");
+    }
+
+    /// Mix Stafford 13 of zero is zero (the algorithm fixed point).
+    #[test]
+    fn mix_stafford_13_zero_is_zero() {
+        assert_eq!(mix_stafford_13(0), 0);
+    }
+
+    /// upgradeSeedTo128bit(0) = mixStafford13(SILVER) ↔ mixStafford13(SILVER + GOLDEN).
+    /// Verifies the seed-upgrade path for a known input.
+    #[test]
+    fn upgrade_seed_zero_matches_constants() {
+        let (lo_unmixed, hi_unmixed) = upgrade_seed_to_128bit_unmixed(0);
+        assert_eq!(lo_unmixed, SILVER_RATIO_64);
+        assert_eq!(hi_unmixed, SILVER_RATIO_64.wrapping_add(GOLDEN_RATIO_64));
+
+        // Mixed via Stafford 13 — just verify the two halves get mixed
+        // (i.e. they change). Exact values are tested via downstream
+        // sample comparisons against vanilla.
+        let (lo_mixed, hi_mixed) = upgrade_seed_to_128bit(0);
+        assert_ne!(lo_mixed, lo_unmixed);
+        assert_ne!(hi_mixed, hi_unmixed);
+    }
+
+    /// Mth.getSeed(0, 0, 0) — all coords zero → seed is 0 before
+    /// shifting (0 * 0 * 42317861 + 0 * 11 = 0 → >> 16 = 0).
+    #[test]
+    fn get_seed_origin_is_zero() {
+        assert_eq!(get_seed(0, 0, 0), 0);
+    }
+
+    /// Mth.getSeed(1, 0, 0) — x=1 → x * 3129871 = 3129871 (mod i32),
+    /// XOR with 0 ^ 0 = 3129871. Then 3129871^2 * 42317861 + 3129871 * 11
+    /// then >> 16. We don't trust hand math; we just verify nonzero and
+    /// stable across calls.
+    #[test]
+    fn get_seed_is_deterministic_and_nonzero() {
+        let a = get_seed(1, 0, 0);
+        let b = get_seed(1, 0, 0);
+        assert_eq!(a, b);
+        assert_ne!(a, 0);
+    }
+
+    /// Two PositionalRandomFactory.at calls at the same (x, y, z) with
+    /// the same factory seeds produce the same nextFloat sequence.
+    #[test]
+    fn positional_factory_is_deterministic() {
+        let factory = XoroshiroPositionalRandomFactory::new(0xDEADBEEF, 0x1234_5678);
+        let mut r1 = factory.at(10, 64, 20);
+        let mut r2 = factory.at(10, 64, 20);
+        for _ in 0..16 {
+            assert_eq!(r1.next_float(), r2.next_float());
+        }
+    }
+
+    /// Different positions yield different sequences.
+    #[test]
+    fn positional_factory_varies_with_position() {
+        let factory = XoroshiroPositionalRandomFactory::new(0xDEADBEEF, 0x1234_5678);
+        let f1 = factory.at(0, 0, 0).next_float();
+        let f2 = factory.at(0, 0, 1).next_float();
+        let f3 = factory.at(1, 0, 0).next_float();
+        // All three should be distinct floats.
+        assert_ne!(f1, f2);
+        assert_ne!(f1, f3);
+        assert_ne!(f2, f3);
+    }
+
+    /// next_float must be in [0.0, 1.0) per vanilla's contract.
+    #[test]
+    fn next_float_is_in_unit_interval() {
+        let factory = XoroshiroPositionalRandomFactory::new(1, 2);
+        for x in -5..=5 {
+            for z in -5..=5 {
+                let f = factory.at(x, -60, z).next_float();
+                assert!((0.0..1.0).contains(&f), "next_float at ({},-60,{}) = {} out of [0,1)", x, z, f);
+            }
+        }
+    }
+
+    /// next_int_bounded must always return a value in [0, bound).
+    #[test]
+    fn next_int_bounded_in_range() {
+        let mut r = XoroshiroRandomSource::from_legacy_seed(42);
+        for _ in 0..1000 {
+            let v = r.next_int_bounded(256);
+            assert!((0..256).contains(&v));
+            let v = r.next_int_bounded(7);
+            assert!((0..7).contains(&v));
+        }
+    }
+
+    /// next_int_bounded with bound=1 must always return 0.
+    #[test]
+    fn next_int_bounded_one_is_zero() {
+        let mut r = XoroshiroRandomSource::from_legacy_seed(123);
+        for _ in 0..32 {
+            assert_eq!(r.next_int_bounded(1), 0);
+        }
+    }
+
+    /// MD5("") = d41d8cd98f00b204e9800998ecf8427e — verifies our
+    /// big-endian byte → i64 decoding matches Guava's `Longs.fromBytes`.
+    #[test]
+    fn seed_from_hash_of_empty_string() {
+        let (lo, hi) = seed_from_hash_of("");
+        assert_eq!(lo as u64, 0xd41d8cd98f00b204);
+        assert_eq!(hi as u64, 0xe9800998ecf8427e);
+    }
+
+    /// Same name → same seed; different names → different seeds.
+    #[test]
+    fn seed_from_hash_of_is_deterministic_and_varies() {
+        let a = seed_from_hash_of("octave_0");
+        let b = seed_from_hash_of("octave_0");
+        let c = seed_from_hash_of("octave_-1");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    /// from_hash_of XORs the MD5 against the factory seeds.
+    #[test]
+    fn from_hash_of_xors_factory_seeds() {
+        let factory = XoroshiroPositionalRandomFactory::new(0xAAAA_BBBB, 0xCCCC_DDDD);
+        let (hash_lo, hash_hi) = seed_from_hash_of("octave_0");
+        let r = factory.from_hash_of("octave_0");
+        assert_eq!(r.generator.seed_lo, hash_lo ^ 0xAAAA_BBBB);
+        assert_eq!(r.generator.seed_hi, hash_hi ^ 0xCCCC_DDDD);
+    }
+
+    /// fork_positional drains exactly two longs and exposes them as the
+    /// new factory's (seed_lo, seed_hi).
+    #[test]
+    fn fork_positional_drains_two_longs() {
+        let mut a = XoroshiroRandomSource::from_legacy_seed(2026);
+        let mut b = XoroshiroRandomSource::from_legacy_seed(2026);
+        let factory = a.fork_positional();
+        let lo = b.next_long();
+        let hi = b.next_long();
+        assert_eq!(factory.seed_lo, lo);
+        assert_eq!(factory.seed_hi, hi);
+    }
+
+    /// consume_count(N) advances the stream by exactly N longs.
+    #[test]
+    fn consume_count_advances_stream() {
+        let mut a = XoroshiroRandomSource::from_legacy_seed(7);
+        let mut b = XoroshiroRandomSource::from_legacy_seed(7);
+        a.consume_count(5);
+        for _ in 0..5 {
+            b.next_long();
+        }
+        assert_eq!(a.next_long(), b.next_long());
+    }
+
+    /// next_double must be in [0.0, 1.0).
+    #[test]
+    fn next_double_is_in_unit_interval() {
+        let mut r = XoroshiroRandomSource::from_legacy_seed(12345);
+        for _ in 0..1000 {
+            let d = r.next_double();
+            assert!((0.0..1.0).contains(&d));
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // LegacyRandomSource parity fixtures (captured from vanilla 26.1.2
+    // via `./gradlew captureLegacyRandomFixtures`). The capturer lives
+    // in src/main/java/me/apika/apikaprobe/tools/LegacyRandomFixtureCapture.java.
+    // ----------------------------------------------------------------
+
+    /// First 5 raw `next(32)` outputs after `LegacyRandomSource(0)`.
+    const FIXTURE_SEED0_NEXT32: [i32; 5] = [
+        -1155484576,
+        -723955400,
+        1033096058,
+        -1690734402,
+        -1557280266,
+    ];
+
+    /// First 5 `next_double()` outputs after `LegacyRandomSource(0)`.
+    /// Captured as `f64::from_bits` to verify the float-widening of the
+    /// `1.110223e-16f` multiplier matches vanilla bit-for-bit.
+    const FIXTURE_SEED0_NEXTDOUBLE: [f64; 5] = [
+        f64::from_bits(0x3fe764168ea6ca89),
+        f64::from_bits(0x3fcec9e5b3672e14),
+        f64::from_bits(0x3fe465b93a78ef81),
+        f64::from_bits(0x3fe19d2e10efa128),
+        f64::from_bits(0x3fe31f174640953b),
+    ];
+
+    /// 256-entry permutation array after the full EndIsland seeding
+    /// sequence: `consume_count(17292)` + 3 `next_double()` +
+    /// 256 `next_int_bound(256-i)` Fisher-Yates swaps. Strongest
+    /// end-to-end check on the LCG path — exercises every method
+    /// including `next_int_bound` against every non-power-of-2 bound
+    /// from 256 down to 1.
+    #[rustfmt::skip]
+    const FIXTURE_SEED0_ENDISLAND_PERMUTATION: [i32; 256] = [
+          9, 165, 129, 139, 252, 242, 221,  76, 188, 103,  25, 205, 168, 148, 130, 254,
+        104,  79, 215, 189, 178,  88, 147, 245, 138, 232,  95, 135, 214, 166,  13, 160,
+        247,  31,  53,  28, 115, 213,  77, 156, 142, 106,  57, 112, 111, 217, 236,  71,
+         44,   0,  56, 105,  94,  87, 102,  45,  18,  85,  70, 199, 231, 253,  10,  52,
+         20, 184, 119, 176,  92,  99, 145, 193,  26,   6, 161, 203, 198, 113, 174, 108,
+         48, 173,  63,  59, 227,  81, 140,  40, 134, 137, 109,  21, 150, 196, 164, 143,
+        152,  54,  29, 228,  41,  16, 225, 131,  93, 154, 229, 144, 222, 237, 151, 230,
+        204, 208,  61, 100, 185, 218, 226, 181, 123, 220,   5, 191, 255, 197,  34, 172,
+         82,  90,  17, 238, 194, 180,  86, 243, 170, 234,  32, 171,  15,  38,  74,  66,
+         89, 122, 157, 162, 209, 211,  47, 153, 233,  49,  30,  64,  50, 110, 120, 149,
+        212,  14,   7,  55, 182, 133,  37, 124, 117, 177,  75, 250, 155,  24, 121, 216,
+        114,  46, 128, 210, 118, 201,  12,  80, 183, 251, 126,  96, 169,  22,  84, 240,
+          3,  36, 200,  42, 187, 132,  73,  58, 235,  97, 190,  11, 107, 206, 202, 163,
+        175, 248,  19, 159,  62,  65, 246,  60,   8,  67, 223,  69,   4, 192, 116, 167,
+         43, 244,  91, 146,  27,  83, 179, 136, 158,  68, 141, 239, 186, 101, 125,   1,
+        127,  51,  23, 195,  33, 249,  39,  35, 224,  72,  98, 219, 241, 207,   2,  78,
+    ];
+
+    #[test]
+    fn parity_legacy_seed0_first_5_next32() {
+        let mut r = LegacyRandomSource::new(0);
+        for (i, expected) in FIXTURE_SEED0_NEXT32.iter().enumerate() {
+            let got = r.next(32);
+            assert_eq!(got, *expected, "next(32) call #{}", i);
+        }
+    }
+
+    #[test]
+    fn parity_legacy_seed0_first_5_next_double() {
+        let mut r = LegacyRandomSource::new(0);
+        for (i, expected) in FIXTURE_SEED0_NEXTDOUBLE.iter().enumerate() {
+            let got = r.next_double();
+            assert_eq!(
+                got.to_bits(),
+                expected.to_bits(),
+                "next_double() #{}: got {:e}, want {:e}",
+                i,
+                got,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn parity_legacy_seed0_endisland_permutation() {
+        let mut r = LegacyRandomSource::new(0);
+        r.consume_count(17292);
+        // Mirror SimplexNoise constructor: 3 nextDoubles for xo/yo/zo.
+        r.next_double();
+        r.next_double();
+        r.next_double();
+        // Fisher-Yates shuffle of [0..256].
+        let mut p: [i32; 256] = std::array::from_fn(|i| i as i32);
+        for i in 0..256 {
+            let bound = (256 - i) as i32;
+            let offset = r.next_int_bound(bound);
+            p.swap(i, (offset + i as i32) as usize);
+        }
+        for (idx, expected) in FIXTURE_SEED0_ENDISLAND_PERMUTATION.iter().enumerate() {
+            assert_eq!(p[idx], *expected, "p[{}]", idx);
+        }
+    }
+}

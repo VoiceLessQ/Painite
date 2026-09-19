@@ -1,0 +1,15 @@
+[workspace]
+resolver = "3"
+members = [
+  "rust/sched",
+  "rust/mod",
+  "rust/terrain",
+]
+
+# Same profile Ferrite measured: fat LTO + one codegen unit halves the
+# native, debuginfo stripped but symbols kept for crash reports, no
+# panic=abort because the cdylib lives inside a JVM.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
