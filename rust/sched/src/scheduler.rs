@@ -86,7 +86,8 @@ struct State {
     blocking: HashSet<u64>,
     granted: HashSet<u64>,
     next_seq: u64,
-    /// Grant order since creation, for tests and the probe.
+    /// Grant order since creation, test builds only (unbounded).
+    #[cfg(test)]
     grant_log: Vec<u64>,
 }
 
@@ -213,6 +214,7 @@ impl Scheduler {
             } else {
                 out.push(key.seq);
             }
+            #[cfg(test)]
             st.grant_log.push(key.seq);
         }
         out
@@ -226,8 +228,8 @@ impl Scheduler {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).waiting.len()
     }
 
-    #[doc(hidden)]
-    pub fn grant_log(&self) -> Vec<u64> {
+    #[cfg(test)]
+    fn grant_log(&self) -> Vec<u64> {
         self.state.lock().unwrap_or_else(|e| e.into_inner()).grant_log.clone()
     }
 }

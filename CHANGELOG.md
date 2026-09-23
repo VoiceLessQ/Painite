@@ -41,6 +41,11 @@ of 2x21 chunks at one per second.
 - Far-view records refreshed from finished chunks sat one block low
   and showed the block under the surface.
 
+### Fixed
+
+- The feature gate kept a grant record per chunk for the life of the
+  server, growing without bound; it is now kept in test builds only.
+
 ## [0.1.0-alpha] - 2026-09-19
 
 ### Changed
