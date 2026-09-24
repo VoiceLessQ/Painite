@@ -20,12 +20,12 @@ fn kind(node: &Node) -> String {
 }
 
 fn time(label: &str, node: &Node, vol: &Volume) {
-    let before = painite_terrain::noise26::LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed);
+    let before = painite_terrain::noise26::layer_samples();
     let t = Instant::now();
     let v = node.sample_volume(vol);
     std::hint::black_box(v.len());
     let ms = t.elapsed().as_secs_f64() * 1e3;
-    let samples = painite_terrain::noise26::LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed) - before;
+    let samples = painite_terrain::noise26::layer_samples() - before;
     println!("{ms:>9.3} ms {samples:>7} smp  {label}  <{}>", kind(node));
     if let Node::Lerp { alpha, .. } = node {
         let a = alpha.sample_volume(vol);
@@ -98,8 +98,8 @@ fn main() {
     let vol = Volume::chunk(cx, cz, -64, 384);
     // warm up
     std::hint::black_box(fd.sample_volume(&vol).len());
-    let before = painite_terrain::noise26::LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed);
-    let before_pt = painite_terrain::noise26::POINT_LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed);
+    let before = painite_terrain::noise26::layer_samples();
+    let before_pt = painite_terrain::noise26::point_layer_samples();
     let mut best = f64::MAX;
     let mut best_noise = 0.0;
     for _ in 0..10 {
@@ -113,8 +113,8 @@ fn main() {
         }
     }
     let ms = best;
-    let samples = (painite_terrain::noise26::LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed) - before) / 10;
-    let pt = (painite_terrain::noise26::POINT_LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed) - before_pt) / 10;
+    let samples = (painite_terrain::noise26::layer_samples() - before) / 10;
+    let pt = (painite_terrain::noise26::point_layer_samples() - before_pt) / 10;
     println!(
         "chunk ({cx}, {cz}): best of 10 {ms:.3} ms (noise {best_noise:.3} ms), {samples} Perlin layer samples ({pt} via point path), {:.1} ns per sample",
         ms * 1e6 / samples as f64

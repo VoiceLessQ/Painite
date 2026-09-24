@@ -4,6 +4,7 @@
 //! worker thread.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -88,8 +89,12 @@ pub struct TerrainState {
     pending: Mutex<HashMap<(i32, i32), PendingFill>>,
     /// Ore batches waiting for their sections, by chunk position.
     ore_pending: Mutex<HashMap<(i32, i32), OreBatch>>,
-    /// Far-view column records of every chunk the native surfaced.
+    /// Far-view column records of every chunk the native surfaced
+    /// while far view is on.
     pub lod: LodStore,
+    /// Set by `keep_lod` when the game turns far view on; until then the
+    /// surface pass builds no records.
+    keep_lod: AtomicBool,
     /// Biome output kept for the surface and ore passes of the chunk and
     /// its eight neighbours.
     biome_cache: Mutex<BiomeCache>,
@@ -132,13 +137,7 @@ impl TerrainState {
     pub fn build_from_loader(loader: &mut Loader, biome_zoom_seed: i64, settings_id: &str) -> Result<Self, Unsupported> {
         let settings = loader.noise_settings(settings_id).map_err(Unsupported::Load)?;
         let sea_level = settings.get("sea_level").and_then(Value::as_i64).ok_or_else(|| Unsupported::Settings("sea_level".into()))? as i32;
-        let default_fluid = settings.get("default_fluid").and_then(|f| f.get("Name")).and_then(Value::as_str).unwrap_or("minecraft:water");
-        let sea_fluid = match default_fluid {
-            "minecraft:water" => Fluid::Water,
-            "minecraft:lava" => Fluid::Lava,
-            "minecraft:air" => Fluid::Air,
-            other => return Err(Unsupported::Settings(format!("default_fluid {other}"))),
-        };
+        let sea_fluid = default_fluid(settings.get("default_fluid"))?;
         let noise = settings.get("noise").ok_or_else(|| Unsupported::Settings("noise".into()))?;
         let min_y = noise.get("min_y").and_then(Value::as_i64).ok_or_else(|| Unsupported::Settings("noise.min_y".into()))? as i32;
         let height = noise.get("height").and_then(Value::as_i64).ok_or_else(|| Unsupported::Settings("noise.height".into()))? as i32;
@@ -194,8 +193,14 @@ impl TerrainState {
             pending: Mutex::new(HashMap::new()),
             ore_pending: Mutex::new(HashMap::new()),
             lod,
+            keep_lod: AtomicBool::new(false),
             biome_cache: Mutex::new(BiomeCache::default()),
         })
+    }
+
+    /// Start keeping far-view records of surfaced chunks.
+    pub fn keep_lod(&self) {
+        self.keep_lod.store(true, Ordering::Relaxed);
     }
 
     pub fn min_y(&self) -> i32 {
@@ -401,8 +406,10 @@ impl TerrainState {
         } else {
             build_surface(&self.surface, &mut chunk, &grid, self.biome_zoom_seed);
         }
-        // A region write error at eviction is reported again by the next flush.
-        let _ = self.lod.insert(chunk_x, chunk_z, ColumnLod::from_chunk(&self.surface, &chunk, &grid));
+        if self.keep_lod.load(Ordering::Relaxed) {
+            // A region write error at eviction is reported again by the next flush.
+            let _ = self.lod.insert(chunk_x, chunk_z, ColumnLod::from_chunk(&self.surface, &chunk, &grid));
+        }
         Some(pack_chunk(&chunk))
     }
 
@@ -595,9 +602,36 @@ fn chunk_palette_len(chunk: &ChunkBlocks) -> usize {
     chunk.blocks.iter().map(|&b| b as usize + 1).max().unwrap_or(1)
 }
 
+/// The settings' `default_fluid` block state in any datapack form: a bare
+/// id, `{"id": ..}` (26.3 codec) or the older `{"Name": ..}`.
+fn default_fluid(v: Option<&Value>) -> Result<Fluid, Unsupported> {
+    let id = match v {
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(Value::Object(o)) => o.get("id").or_else(|| o.get("Name")).and_then(Value::as_str),
+        _ => None,
+    };
+    let id = id.ok_or_else(|| Unsupported::Settings("default_fluid".into()))?;
+    match id.strip_prefix("minecraft:").unwrap_or(id) {
+        "water" => Ok(Fluid::Water),
+        "lava" => Ok(Fluid::Lava),
+        "air" => Ok(Fluid::Air),
+        _ => Err(Unsupported::Settings(format!("default_fluid {id}"))),
+    }
+}
+
 #[cfg(test)]
 mod pack_tests {
     use super::*;
+
+    #[test]
+    fn default_fluid_every_form() {
+        let fluid = |v: Value| default_fluid(Some(&v)).ok();
+        assert_eq!(fluid(serde_json::json!({"id": "minecraft:lava", "properties": {"level": "0"}})), Some(Fluid::Lava));
+        assert_eq!(fluid(serde_json::json!({"Name": "minecraft:water", "Properties": {"level": "0"}})), Some(Fluid::Water));
+        assert_eq!(fluid(serde_json::json!("minecraft:air")), Some(Fluid::Air));
+        assert_eq!(fluid(serde_json::json!({"id": "minecraft:honey_block"})), None);
+        assert!(default_fluid(None).is_err());
+    }
 
     /// `SimpleBitStorage.get`.
     fn storage_get(words: &[i64], bits: u32, index: usize) -> u64 {

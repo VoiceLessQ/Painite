@@ -39,6 +39,12 @@ public abstract class NoiseChunkMixin implements PainiteNoiseChunk {
 	}
 
 	@Override
+	public void painite$decline() {
+		this.painite$eligible = false;
+		this.painite$nativeFilled = false;
+	}
+
+	@Override
 	public int[] painite$beard() {
 		return this.painite$beard;
 	}

@@ -10,19 +10,38 @@
 //! `perlin.rs` (Ferrite's f64 port) is kept for the legacy blended
 //! noise and older code paths; nothing here calls into it.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::Cell;
 
 use crate::xoroshiro::{XoroshiroPositionalRandomFactory, XoroshiroRandomSource};
 
-/// Perlin lattice samples since process start (one per stack layer per
-/// point). Relaxed counter; read it around a workload to size the work.
-pub static LAYER_SAMPLES: AtomicU64 = AtomicU64::new(0);
-/// Subset of [`LAYER_SAMPLES`] taken through the point path (`get`, `get_2d`).
-pub static POINT_LAYER_SAMPLES: AtomicU64 = AtomicU64::new(0);
+// Both are const already; the lint misreads the const block.
+thread_local! {
+    #[allow(clippy::missing_const_for_thread_local)]
+    static LAYER_SAMPLES: Cell<u64> = const { Cell::new(0) };
+    #[allow(clippy::missing_const_for_thread_local)]
+    static POINT_LAYER_SAMPLES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Perlin lattice samples this thread has taken (one per stack layer per
+/// point). Per thread so worker threads share no cache line; read it
+/// around a workload on the same thread to size the work.
+pub fn layer_samples() -> u64 {
+    LAYER_SAMPLES.with(Cell::get)
+}
+
+/// Subset of [`layer_samples`] taken through the point path (`get`, `get_2d`).
+pub fn point_layer_samples() -> u64 {
+    POINT_LAYER_SAMPLES.with(Cell::get)
+}
 
 #[inline]
 fn count_layers(n: usize) {
-    LAYER_SAMPLES.fetch_add(n as u64, Ordering::Relaxed);
+    LAYER_SAMPLES.with(|c| c.set(c.get() + n as u64));
+}
+
+#[inline]
+fn count_point_layers(n: usize) {
+    POINT_LAYER_SAMPLES.with(|c| c.set(c.get() + n as u64));
 }
 
 /// `GradientNoise.GRADIENT`, 16 entries.
@@ -653,7 +672,7 @@ impl NoiseStack {
     #[inline]
     pub fn get(&self, x: f64, y: f64, z: f64) -> f32 {
         count_layers(self.layers.len());
-        POINT_LAYER_SAMPLES.fetch_add(self.layers.len() as u64, Ordering::Relaxed);
+        count_point_layers(self.layers.len());
         let mut value = 0.0f32;
         for layer in &self.layers {
             let f = layer.frequency;
@@ -666,7 +685,7 @@ impl NoiseStack {
     #[inline]
     pub fn get_2d(&self, x: f64, y: f64) -> f32 {
         count_layers(self.layers.len());
-        POINT_LAYER_SAMPLES.fetch_add(self.layers.len() as u64, Ordering::Relaxed);
+        count_point_layers(self.layers.len());
         let mut value = 0.0f32;
         for layer in &self.layers {
             let f = layer.frequency;

@@ -1758,7 +1758,7 @@ impl Loader {
                         let special = if a == 0.5 {
                             Node::Sqrt(base)
                         } else if a == 1.0 {
-                            return Ok(base);
+                            return Ok(if e >= 0.0 { base } else { Arc::new(Node::Reciprocal(base)) });
                         } else if a == 2.0 {
                             Node::Square(base)
                         } else if a == 3.0 {
@@ -2053,6 +2053,18 @@ mod tests {
         assert_eq!(q.eval(0, 0, 0, Mode::Point), -0.5);
         let q = Node::QuarterNegative(c(-0.0));
         assert!(q.eval(0, 0, 0, Mode::Point).is_sign_negative());
+    }
+
+    #[test]
+    fn pow_constant_exponent_keeps_sign() {
+        // y itself as the base, so only the exponent is constant.
+        let y = serde_json::json!({"type": "minecraft:gradient", "axis": "y", "from_coordinate": 0, "to_coordinate": 10, "from_value": 0.0, "to_value": 10.0});
+        let mut loader = Loader::from_memory(0, Vec::new());
+        for (e, want) in [(1.0, 4.0), (-1.0, 0.25), (2.0, 16.0), (-2.0, 0.0625), (-0.5, 0.5)] {
+            let v = serde_json::json!({"type": "minecraft:pow", "base": y, "exponent": e});
+            let n = loader.parse(&v).unwrap();
+            assert_eq!(n.eval(0, 4, 0, Mode::Point), want, "exponent {e}");
+        }
     }
 
     #[test]

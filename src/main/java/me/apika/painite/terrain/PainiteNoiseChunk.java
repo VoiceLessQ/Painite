@@ -5,6 +5,9 @@ public interface PainiteNoiseChunk {
 	/** True when the chunk has no blending, the one input the native fill lacks. */
 	boolean painite$eligible();
 
+	/** Keeps the native path off this chunk, for a vanilla fill after the native lost it. */
+	void painite$decline();
+
 	/** The structure pieces bearding this chunk in the native's flat layout, or null when there are none. */
 	int[] painite$beard();
 

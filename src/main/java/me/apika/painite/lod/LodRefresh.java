@@ -41,7 +41,8 @@ public final class LodRefresh {
 		BlockPos.MutableBlockPos at = new BlockPos.MutableBlockPos();
 		for (int z = 0; z < 16; z++) {
 			for (int x = 0; x < 16; x++) {
-				int h = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z);
+				// getHeight is the top block; the record holds the first free y above it, as the generator's does.
+				int h = chunk.getHeight(Heightmap.Types.WORLD_SURFACE, x, z) + 1;
 				int c = x + z * 16;
 				heights[c] = h;
 				if (h > minY) {

@@ -20,6 +20,7 @@ import net.minecraft.world.level.levelgen.blending.Blender;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
 import net.minecraft.world.level.levelgen.material.rule.MaterialRule;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
@@ -27,6 +28,11 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 /** Replaces doFill with the native fill when the world and chunk qualify. Busy timers around every part. */
 @Mixin(NoiseBasedChunkGenerator.class)
 public abstract class NoiseBasedChunkGeneratorMixin {
+	@Shadow
+	private void doFill(NoiseChunk noiseChunk, ChunkAccess chunk) {
+		throw new AssertionError();
+	}
+
 	@WrapMethod(method = "createNoiseChunk")
 	private NoiseChunk painite$timeNoiseChunk(ChunkAccess chunk, net.minecraft.world.level.StructureManager structureManager, Blender blender,
 			RandomState randomState, net.minecraft.world.level.levelgen.NoiseSettings settings, Operation<NoiseChunk> original) {
@@ -136,10 +142,14 @@ public abstract class NoiseBasedChunkGeneratorMixin {
 		// Surface declined: write the fill alone and let vanilla build the surface.
 		TerrainBridge.SURFACE_FALLBACKS.incrementAndGet();
 		byte[] fill = packed == null ? PainiteNative.terrainTake(chunkX, chunkZ) : null;
-		if (fill == null || fill.length != volume.size()) {
-			throw new IllegalStateException("[painite] native fill for chunk " + chunk.getPos() + " lost");
+		if (fill != null && fill.length == volume.size()) {
+			TerrainBridge.writeBlocks(chunk, volume, fill);
+			return;
 		}
-		TerrainBridge.writeBlocks(chunk, volume, fill);
+		// The native no longer holds a usable fill (a rejected write consumed it): run vanilla's.
+		TerrainBridge.LOST_FILLS.incrementAndGet();
+		((PainiteNoiseChunk) noiseChunk).painite$decline();
+		this.doFill(noiseChunk, chunk);
 	}
 
 	@WrapMethod(method = "generateCarvers")

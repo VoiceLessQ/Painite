@@ -1659,9 +1659,9 @@ fn prefill_ores(rule: &Rule, narrowed: &Volume, ctx: &mut SampleCtx, out: &mut O
         Rule::OreVein { slot, density: d, richness: r, .. } => {
             let (density, richness) = (&mut out.density, &mut out.richness);
             let t = std::time::Instant::now();
-            let l0 = crate::noise26::LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed);
+            let l0 = crate::noise26::layer_samples();
             density[*slot] = d.sample_volume_with(narrowed, ctx);
-            let l1 = crate::noise26::LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed);
+            let l1 = crate::noise26::layer_samples();
             let t1 = t.elapsed().as_secs_f64() * 1e3;
             // Richness is only read where density is positive: sample the rows that hold one, widened to whole 8-block cells.
             let size_y = narrowed.size[1];
@@ -1688,7 +1688,7 @@ fn prefill_ores(rule: &Rule, narrowed: &Volume, ctx: &mut SampleCtx, out: &mut O
                 (0, 0)
             };
             out.richness_rows[*slot] = rows;
-            let l2 = crate::noise26::LAYER_SAMPLES.load(std::sync::atomic::Ordering::Relaxed);
+            let l2 = crate::noise26::layer_samples();
             if std::env::var("PAINITE_SURFACE_TRACE").is_ok() {
                 let positive = density[*slot].iter().filter(|&&d| d > 0.0).count();
                 eprintln!(

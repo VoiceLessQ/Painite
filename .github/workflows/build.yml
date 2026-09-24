@@ -45,11 +45,14 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
-      - name: cargo clippy (deny-level lints gate the build)
+      - name: cargo clippy (deny-level lints gate the build, tests included)
         shell: bash
         run: |
           rustup component add clippy
-          cargo clippy --release --target x86_64-unknown-linux-gnu --manifest-path=rust/mod/Cargo.toml
+          cargo clippy --workspace --all-targets --release --target x86_64-unknown-linux-gnu
+      - name: cargo test
+        shell: bash
+        run: cargo test --workspace --release --target x86_64-unknown-linux-gnu
       - name: cargo build (x86_64-unknown-linux-gnu)
         shell: bash
         run: cargo build --release --target x86_64-unknown-linux-gnu --manifest-path=rust/mod/Cargo.toml

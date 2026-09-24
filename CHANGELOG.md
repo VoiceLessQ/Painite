@@ -18,6 +18,28 @@ of 2x21 chunks at one per second.
 - Licence is now GPL-3.0-only instead of MIT. Modified builds and
   mods built on Painite's code must publish their source. The Ferrite
   code in rust/terrain keeps its MIT notice.
+- Far-view records are only built when `-Dpainite.lod=true`. Before,
+  every native chunk kept one in memory anyway, up to about 600 MB.
+- Noise sample counters are per thread, so workers no longer contend
+  on one shared counter.
+- CI runs `cargo test` and lints test code too.
+
+### Fixed
+
+- The native terrain stage only serves the overworld it was built for.
+  Other dimensions that reuse the overworld settings got its biomes and
+  seed.
+- A dimension whose height differs from its noise settings now stays on
+  vanilla. Before, it crashed every chunk or shifted terrain 64 blocks.
+- A rejected native chunk falls back to vanilla's fill instead of
+  throwing "native fill lost".
+- A panic in the native no longer kills the JVM; the call declines and
+  the chunk goes vanilla.
+- `pow` with exponent -1 gave x instead of 1/x.
+- `default_fluid` in the 26.3 format was ignored and always read as
+  water.
+- Far-view records refreshed from finished chunks sat one block low
+  and showed the block under the surface.
 
 ## [0.1.0-alpha] - 2026-09-19
 

@@ -1852,10 +1852,10 @@ mod tests {
 
     #[test]
     fn constant_returns_value() {
-        let df = DensityFunction::Constant(3.14);
-        assert_eq!(df.compute(&ctx(0, 0, 0), &empty_state()), 3.14);
-        assert_eq!(df.min_value(), 3.14);
-        assert_eq!(df.max_value(), 3.14);
+        let df = DensityFunction::Constant(1.23);
+        assert_eq!(df.compute(&ctx(0, 0, 0), &empty_state()), 1.23);
+        assert_eq!(df.min_value(), 1.23);
+        assert_eq!(df.max_value(), 1.23);
     }
 
     #[test]
@@ -2296,9 +2296,9 @@ mod tests {
     #[test]
     fn bytecode_constant() {
         let mut buf = Vec::new();
-        emit_constant(&mut buf, 3.14);
+        emit_constant(&mut buf, 1.23);
         let df = parse_bytecode(&buf).unwrap();
-        assert_eq!(df.compute(&ctx(0, 0, 0), &empty_state()), 3.14);
+        assert_eq!(df.compute(&ctx(0, 0, 0), &empty_state()), 1.23);
     }
 
     #[test]

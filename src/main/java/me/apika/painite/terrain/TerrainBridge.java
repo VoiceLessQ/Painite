@@ -60,6 +60,7 @@ import net.minecraft.world.level.levelgen.feature.OreFeature;
 import net.minecraft.world.level.levelgen.placement.PlacedFeature;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.NoiseSettings;
 import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
 import net.minecraft.world.level.levelgen.densityfunction.DensityFunctions;
 import net.minecraft.world.level.levelgen.densityfunction.DensityVolume;
@@ -82,10 +83,11 @@ public final class TerrainBridge {
 	/** Whether the compiled terrain can carve, asked once after terrainInit. */
 	private static volatile boolean nativeCarvers;
 
-	private static volatile ResourceKey<NoiseGeneratorSettings> activeSettings;
-	/** Biome holder per native biome index (registry order), valid while activeSettings is set. */
+	/** The overworld generator the native was compiled for; no other generator is served. */
+	private static volatile NoiseBasedChunkGenerator activeGenerator;
+	/** Biome holder per native biome index (registry order), valid while activeGenerator is set. */
 	private static volatile Holder<Biome>[] biomeHolders = new Holder[0];
-	/** Block state per native palette id, valid while activeSettings is set. */
+	/** Block state per native palette id, valid while activeGenerator is set. */
 	private static volatile BlockState[] palette = new BlockState[0];
 	/** Biome registry index per biome id, the order the native was given. */
 	private static volatile Map<Identifier, Integer> biomeIndex = Map.of();
@@ -96,6 +98,8 @@ public final class TerrainBridge {
 	public static final AtomicLong NATIVE_SURFACES = new AtomicLong();
 	public static final AtomicLong NATIVE_BIOMES = new AtomicLong();
 	public static final AtomicLong SURFACE_FALLBACKS = new AtomicLong();
+	/** Declined surfaces whose native fill was already gone, so vanilla filled the chunk again. */
+	public static final AtomicLong LOST_FILLS = new AtomicLong();
 	/** Passes that had to read the quart grid from the game because the native lacked a neighbour's biomes. */
 	public static final AtomicLong GRID_FALLBACKS = new AtomicLong();
 	/** Chunks whose carvers ran in the native surface pass. */
@@ -116,7 +120,7 @@ public final class TerrainBridge {
 		ServerLevelEvents.UNLOAD.register((server, level) -> {
 			if (level.dimension() == Level.OVERWORLD) {
 				flushLod();
-				activeSettings = null;
+				activeGenerator = null;
 				palette = new BlockState[0];
 				biomeIndex = Map.of();
 				biomeHolders = new Holder[0];
@@ -126,10 +130,13 @@ public final class TerrainBridge {
 		});
 	}
 
-	/** True when this generator's settings are the ones compiled in the native. */
+	/**
+	 * True only for the overworld generator the native was compiled for. Another dimension reusing
+	 * the same settings key can have its own seed or biome source, and the native state is keyed by
+	 * chunk position alone.
+	 */
 	public static boolean serves(NoiseBasedChunkGenerator generator) {
-		ResourceKey<NoiseGeneratorSettings> active = activeSettings;
-		return active != null && generator.generatorSettings().unwrapKey().map(active::equals).orElse(false);
+		return generator == activeGenerator;
 	}
 
 	private static void onLoad(ServerLevel level) {
@@ -146,6 +153,14 @@ public final class TerrainBridge {
 		ResourceKey<NoiseGeneratorSettings> key = settings.unwrapKey().orElse(null);
 		if (key == null) {
 			PainiteMod.LOGGER.info("[painite] rustTerrain: inline noise settings, vanilla path");
+			return;
+		}
+		// The native fills the noise range and writes it from the chunk's min y; vanilla clamps the
+		// range to the level instead, so any difference would crash or shift the terrain.
+		NoiseSettings noise = settings.value().noiseSettings();
+		if (noise.minY() != level.getMinY() || noise.height() != level.getHeight()) {
+			PainiteMod.LOGGER.info("[painite] rustTerrain: noise range {}+{} differs from the level's {}+{}, vanilla path",
+					noise.minY(), noise.height(), level.getMinY(), level.getHeight());
 			return;
 		}
 		RegistryOps<JsonElement> ops = RegistryOps.create(JsonOps.INSTANCE, level.registryAccess());
@@ -206,13 +221,13 @@ public final class TerrainBridge {
 		int result = PainiteNative.terrainInit(level.getSeed(), biomeZoomSeed, key.identifier().toString(),
 				kinds.toArray(String[]::new), ids.toArray(String[]::new), bodies.toArray(String[]::new));
 		if (result != 1) {
-			activeSettings = null;
+			activeGenerator = null;
 			PainiteMod.LOGGER.info("[painite] rustTerrain: native declined {} (code {}), vanilla path", key.identifier(), result);
 			return;
 		}
 		String[] names = PainiteNative.terrainPalette();
 		if (names == null || !installPalette(names, ops)) {
-			activeSettings = null;
+			activeGenerator = null;
 			PainiteNative.terrainClear();
 			return;
 		}
@@ -227,7 +242,7 @@ public final class TerrainBridge {
 			me.apika.painite.lod.LodPalette.load(java.nio.file.Path.of(dir));
 		}
 		long ms = (System.nanoTime() - start) / 1_000_000L;
-		activeSettings = key;
+		activeGenerator = noiseGenerator;
 		PainiteMod.LOGGER.info("[painite] rustTerrain active for {} ({} documents, {} palette states, carvers {}, {} ms)",
 				key.identifier(), ids.size(), names.length, nativeCarvers ? (CARVERS ? "native" : "off") : "vanilla", ms);
 	}
@@ -629,7 +644,7 @@ public final class TerrainBridge {
 	}
 
 	public static boolean lodActive() {
-		return LOD && activeSettings != null;
+		return LOD && activeGenerator != null;
 	}
 
 	/** The block state per native palette id, as the command syntax spells it. */
@@ -654,7 +669,7 @@ public final class TerrainBridge {
 
 	/** Write the changed far-view regions; nothing when no terrain is compiled. */
 	public static void flushLod() {
-		if (!LOD || activeSettings == null) {
+		if (!LOD || activeGenerator == null) {
 			return;
 		}
 		int written = PainiteNative.terrainLodFlush();
@@ -672,7 +687,7 @@ public final class TerrainBridge {
 
 	public static String report() {
 		String carve = "";
-		if (PainiteNative.AVAILABLE && activeSettings != null) {
+		if (PainiteNative.AVAILABLE && activeGenerator != null) {
 			long[] c = PainiteNative.terrainCarveStats();
 			if (c != null && c.length >= 6 && c[0] > 0) {
 				carve = String.format(Locale.ROOT, "  carvers chunks=%d mask=%.3fms apply=%.3fms carved=%d aquifer=%d topMaterial=%d\n",
@@ -681,7 +696,7 @@ public final class TerrainBridge {
 		}
 		return "  terrain native=" + NATIVE_FILLS.get() + " vanilla=" + VANILLA_FILLS.get() + " ineligible=" + INELIGIBLE_FILLS.get()
 				+ " beard=" + BEARD_FILLS.get()
-				+ " surface=" + NATIVE_SURFACES.get() + " surfaceFallback=" + SURFACE_FALLBACKS.get() + " gridFallback=" + GRID_FALLBACKS.get()
+				+ " surface=" + NATIVE_SURFACES.get() + " surfaceFallback=" + SURFACE_FALLBACKS.get() + " lostFill=" + LOST_FILLS.get() + " gridFallback=" + GRID_FALLBACKS.get()
 				+ " biomes=" + NATIVE_BIOMES.get() + " carved=" + NATIVE_CARVES.get() + "\n"
 				+ carve
 				+ OreBridge.report();
