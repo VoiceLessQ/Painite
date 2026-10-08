@@ -1,8 +1,10 @@
 package me.apika.painite;
 
+import com.sun.management.HotSpotDiagnosticMXBean;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.management.ManagementFactory;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.Locale;
@@ -10,7 +12,9 @@ import java.util.Locale;
 /** Loads the bundled native and exposes the scheduler calls. */
 public final class PainiteNative {
 	private static final String NATIVE_WINDOWS = "/assets/painite/natives/windows/painite.dll";
+	private static final String NATIVE_WINDOWS_V3 = "/assets/painite/natives/windows/painite_v3.dll";
 	private static final String NATIVE_LINUX = "/assets/painite/natives/linux/libpainite.so";
+	private static final String NATIVE_LINUX_V3 = "/assets/painite/natives/linux/libpainite_v3.so";
 	private static final String NATIVE_LINUX_AARCH64 = "/assets/painite/natives/linux-aarch64/libpainite.so";
 	private static final String NATIVE_MACOS = "/assets/painite/natives/macos/libpainite.dylib";
 
@@ -25,13 +29,18 @@ public final class PainiteNative {
 	private static boolean load() {
 		String osName = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
 		String osArch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
+		boolean x64 = osArch.equals("amd64") || osArch.equals("x86_64");
 		String resourcePath;
 		String suffix;
 		if (osName.contains("win")) {
-			resourcePath = NATIVE_WINDOWS;
+			resourcePath = x64 ? pickX64(NATIVE_WINDOWS, NATIVE_WINDOWS_V3) : NATIVE_WINDOWS;
 			suffix = ".dll";
 		} else if (osName.contains("linux")) {
-			resourcePath = (osArch.contains("aarch64") || osArch.contains("arm64")) ? NATIVE_LINUX_AARCH64 : NATIVE_LINUX;
+			if (osArch.contains("aarch64") || osArch.contains("arm64")) {
+				resourcePath = NATIVE_LINUX_AARCH64;
+			} else {
+				resourcePath = x64 ? pickX64(NATIVE_LINUX, NATIVE_LINUX_V3) : NATIVE_LINUX;
+			}
 			suffix = ".so";
 		} else if (osName.contains("mac") || osName.contains("darwin")) {
 			resourcePath = NATIVE_MACOS;
@@ -49,11 +58,37 @@ public final class PainiteNative {
 			tmp.deleteOnExit();
 			Files.copy(in, tmp.toPath(), StandardCopyOption.REPLACE_EXISTING);
 			System.load(tmp.getAbsolutePath());
-			PainiteMod.LOGGER.info("[painite] loaded native from {}", tmp.getAbsolutePath());
+			PainiteMod.LOGGER.info("[painite] loaded native {} from {}", resourcePath, tmp.getAbsolutePath());
 			return true;
 		} catch (UnsatisfiedLinkError | IOException e) {
 			PainiteMod.LOGGER.error("[painite] native failed to load, running without native: {}", e.getMessage());
 			return false;
+		}
+	}
+
+	/**
+	 * The x86-64-v3 build when HotSpot found AVX2, FMA, BMI1, BMI2, LZCNT and
+	 * POPCNT on this CPU and the jar carries it, else the baseline build.
+	 * -Dpainite.nativeV3=false forces the baseline.
+	 */
+	private static String pickX64(String baseline, String v3) {
+		if (!Boolean.parseBoolean(System.getProperty("painite.nativeV3", "true")) || PainiteNative.class.getResource(v3) == null) {
+			return baseline;
+		}
+		try {
+			HotSpotDiagnosticMXBean vm = ManagementFactory.getPlatformMXBean(HotSpotDiagnosticMXBean.class);
+			if (Integer.parseInt(vm.getVMOption("UseAVX").getValue()) < 2) {
+				return baseline;
+			}
+			for (String flag : new String[] {"UseFMA", "UseBMI1Instructions", "UseBMI2Instructions", "UseCountLeadingZerosInstruction", "UsePopCountInstruction"}) {
+				if (!Boolean.parseBoolean(vm.getVMOption(flag).getValue())) {
+					return baseline;
+				}
+			}
+			return v3;
+		} catch (RuntimeException | LinkageError e) {
+			// Not HotSpot, or no jdk.management: the baseline runs on any x86-64.
+			return baseline;
 		}
 	}
 

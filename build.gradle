@@ -64,7 +64,7 @@ loom {
 			vmArg "-Xms512M"
 			// Feature flags pass through as given: -Ppainite.rustTerrain=false
 			// turns a default-on flag off, -Ppainite.rustOres=true a default-off one on.
-			for (flag in ['parallelFeatures', 'parallelStructures', 'rustTerrain', 'rustOres', 'oreShadow', 'fastPack', 'oreProbe', 'featureProbe', 'lod', 'frameProbe', 'lodDraw']) {
+			for (flag in ['parallelFeatures', 'parallelStructures', 'rustTerrain', 'rustOres', 'oreShadow', 'fastPack', 'oreProbe', 'featureProbe', 'lod', 'frameProbe', 'lodDraw', 'nativeV3']) {
 				def value = project.findProperty("painite.${flag}")?.toString()
 				if (value == "true" || value == "false") {
 					vmArg "-Dpainite.${flag}=${value}"
@@ -113,11 +113,31 @@ tasks.register('buildRustLib', Exec) {
 	commandLine 'cargo', 'build', '--release', '--target', nativeTarget, '--manifest-path=rust/mod/Cargo.toml'
 }
 
+// x86-64 hosts also get an x86-64-v3 build, loaded on CPUs the JVM reports
+// AVX2/FMA/BMI2 for. MOVBE stays off: the JVM has no flag to check it by.
+def nativeV3 = nativeTarget in ['x86_64-unknown-linux-gnu', 'x86_64-pc-windows-gnu']
+def nativeV3LibName = nativeLibName.replace('painite.', 'painite_v3.')
+
+tasks.register('buildRustLibV3', Exec) {
+	group = 'rust'
+	description = "Builds the x86-64-v3 Rust native library for ${nativeTarget}."
+	onlyIf { nativeV3 }
+	workingDir = projectDir
+	environment 'RUSTFLAGS', '-C target-cpu=x86-64-v3 -C target-feature=-movbe'
+	environment 'CARGO_TARGET_DIR', file('target/v3').absolutePath
+	commandLine 'cargo', 'build', '--release', '--target', nativeTarget, '--manifest-path=rust/mod/Cargo.toml'
+}
+
 tasks.register('copyRustDll', Copy) {
 	group = 'rust'
 	description = "Copies the built Rust native into main resources/${nativeOsDir}/."
-	dependsOn tasks.named('buildRustLib')
+	dependsOn tasks.named('buildRustLib'), tasks.named('buildRustLibV3')
 	from rustLibPath
+	if (nativeV3) {
+		from("target/v3/${nativeTarget}/release/${nativeLibName}") {
+			rename { nativeV3LibName }
+		}
+	}
 	into nativesDir
 }
 

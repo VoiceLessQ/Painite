@@ -13,6 +13,16 @@ of 2x21 chunks at one per second.
 
 ## [Unreleased]
 
+### Added
+
+- A second native for Windows and Linux on x86-64, built for
+  x86-64-v3 (AVX2, FMA, BMI2). It loads when the JVM reports those
+  features, which Intel Core CPUs have had since Haswell, as has every
+  AMD Ryzen; other CPUs keep the baseline build. In the burst the
+  terrain fill takes about 6% less CPU and the surface pass about 2%,
+  with the same blocks out. `-Dpainite.nativeV3=false` keeps the
+  baseline build.
+
 ### Changed
 
 - Licence is now GPL-3.0-only instead of MIT. Modified builds and

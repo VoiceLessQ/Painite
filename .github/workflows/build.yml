@@ -10,7 +10,9 @@
 # The final jar ships with all three binaries under
 # assets/painite/natives/{windows,linux,macos}/. PainiteNative.java picks
 # the one matching the host OS at runtime and falls back cleanly on
-# unsupported platforms.
+# unsupported platforms. The Windows and Linux x86-64 jobs also build an
+# x86-64-v3 native (painite_v3.dll, libpainite_v3.so), loaded when the JVM
+# reports AVX2, FMA and BMI2 on the CPU.
 
 name: build
 on: [pull_request, push]
@@ -33,11 +35,25 @@ jobs:
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_AR: ar
         run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path=rust/mod/Cargo.toml
+      - name: cargo build x86-64-v3 (x86_64-pc-windows-gnu)
+        shell: bash
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_AR: ar
+          RUSTFLAGS: -C target-cpu=x86-64-v3 -C target-feature=-movbe
+          CARGO_TARGET_DIR: target/v3
+        run: cargo build --release --target x86_64-pc-windows-gnu --manifest-path=rust/mod/Cargo.toml
+      - name: stage natives
+        shell: bash
+        run: |
+          mkdir -p natives
+          cp target/x86_64-pc-windows-gnu/release/painite.dll natives/
+          cp target/v3/x86_64-pc-windows-gnu/release/painite.dll natives/painite_v3.dll
       - name: upload native
         uses: actions/upload-artifact@v4
         with:
           name: native-windows
-          path: target/x86_64-pc-windows-gnu/release/painite.dll
+          path: natives/
           if-no-files-found: error
 
   build-native-linux:
@@ -56,11 +72,23 @@ jobs:
       - name: cargo build (x86_64-unknown-linux-gnu)
         shell: bash
         run: cargo build --release --target x86_64-unknown-linux-gnu --manifest-path=rust/mod/Cargo.toml
+      - name: cargo build x86-64-v3 (x86_64-unknown-linux-gnu)
+        shell: bash
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v3 -C target-feature=-movbe
+          CARGO_TARGET_DIR: target/v3
+        run: cargo build --release --target x86_64-unknown-linux-gnu --manifest-path=rust/mod/Cargo.toml
+      - name: stage natives
+        shell: bash
+        run: |
+          mkdir -p natives
+          cp target/x86_64-unknown-linux-gnu/release/libpainite.so natives/
+          cp target/v3/x86_64-unknown-linux-gnu/release/libpainite.so natives/libpainite_v3.so
       - name: upload native
         uses: actions/upload-artifact@v4
         with:
           name: native-linux
-          path: target/x86_64-unknown-linux-gnu/release/libpainite.so
+          path: natives/
           if-no-files-found: error
 
   build-native-linux-aarch64:

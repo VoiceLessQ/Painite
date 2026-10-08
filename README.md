@@ -80,6 +80,7 @@ A/B testing and the odd misbehaving worldgen mod:
 -Dpainite.parallelFeatures=false   # serial feature placement, as vanilla
 -Dpainite.rustTerrain=false        # vanilla terrain stage
 -Dpainite.workers=4                # feature workers, default cores minus one (max 16); 4 measured as the knee
+-Dpainite.nativeV3=false           # baseline native even on CPUs with AVX2
 ```
 
 `/painite probe report` prints where the generation time went on a
