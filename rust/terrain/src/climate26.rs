@@ -428,10 +428,28 @@ impl BiomeStage {
     /// `BiomeSource.getNoiseBiome(quartX, quartY, quartZ)` through the
     /// uncached resolver: one climate sample and one tree search.
     pub fn biome_at_quart(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> u16 {
+        let target = self.point_target(quart_x, quart_y, quart_z);
+        self.tree.value(self.tree.search(&target, None))
+    }
+
+    /// Test hook: every biome at the minimum distance from the point
+    /// target. On a tie the warm start may return any of them.
+    pub fn nearest_biomes_at_quart(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> Vec<u16> {
+        let target = self.point_target(quart_x, quart_y, quart_z);
+        let distances: Vec<i64> = self.tree.leaves.iter().map(|(space, _)| space_distance(space, &target)).collect();
+        let min = *distances.iter().min().expect("tree has leaves");
+        let mut out: Vec<u16> = self.tree.leaves.iter().zip(&distances).filter(|(_, d)| **d == min).map(|((_, b), _)| *b).collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    /// The quantized climate target at one quart, one point sample each.
+    fn point_target(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> [i64; DIMENSIONS] {
         let (x, y, z) = (quart_x << 2, quart_y << 2, quart_z << 2);
         let mut pc = PointCache::new();
         let mut at = |n: &Node| quantize(n.eval_with(x, y, z, Mode::Point, &mut pc));
-        let target = [
+        [
             at(&self.temperature),
             at(&self.humidity),
             at(&self.continentalness),
@@ -439,8 +457,7 @@ impl BiomeStage {
             at(&self.depth),
             at(&self.weirdness),
             0,
-        ];
-        self.tree.value(self.tree.search(&target, None))
+        ]
     }
 
     /// Biome index per quart of a chunk, `y + (x + z * 4) * (height / 4)`,

@@ -207,7 +207,9 @@ fn carve_on_vanilla_surface_matches() {
 }
 
 /// The carver biome from a single climate sample equals the biome stage's
-/// chunk output at the same quart.
+/// chunk output at the same quart. The two may differ only on an exact
+/// distance tie, where the search's warm start (vanilla's thread-local
+/// last result) picks either leaf.
 #[test]
 fn carver_biome_matches_chunk_biomes() {
     let Some((root, pairs)) = setup() else { return };
@@ -216,15 +218,22 @@ fn carver_biome_matches_chunk_biomes() {
     let biomes = w.state.biomes.as_ref().expect("biome stage");
     let quart_y = (-surface.min_y >> 2) as usize;
     let mut differ = 0;
+    let mut ties = 0;
     for dx in -9..=9 {
         for dz in -9..=9 {
             let (cx, cz) = (surface.chunk_x + dx, surface.chunk_z + dz);
             let from_chunk = biomes.chunk_biomes(cx, cz)[quart_y];
             let from_point = w.state.carver_biome(cx, cz);
             if from_chunk != from_point {
-                differ += 1;
+                let nearest = biomes.nearest_biomes_at_quart(cx << 2, 0, cz << 2);
+                if nearest.contains(&from_chunk) && nearest.contains(&from_point) {
+                    ties += 1;
+                } else {
+                    differ += 1;
+                }
             }
         }
     }
+    println!("{ties} source chunk(s) on a tie between equally near leaves");
     assert_eq!(differ, 0, "{differ} source chunks disagree between the point sample and the chunk pass");
 }
