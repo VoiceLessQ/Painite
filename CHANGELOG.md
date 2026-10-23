@@ -13,6 +13,8 @@ of 2x21 chunks at one per second.
 
 ## [Unreleased]
 
+## [0.2.0-alpha] - 2026-10-23
+
 ### Added
 
 - A second native for Windows and Linux on x86-64, built for
@@ -251,5 +253,6 @@ of 2x21 chunks at one per second.
   covers the same need; the code is kept for the record format and
   the client store.
 
-[Unreleased]: https://github.com/VoiceLessQ/Painite/compare/v0.1.0-alpha...HEAD
+[Unreleased]: https://github.com/VoiceLessQ/Painite/compare/v0.2.0-alpha...HEAD
+[0.2.0-alpha]: https://github.com/VoiceLessQ/Painite/compare/v0.1.0-alpha...v0.2.0-alpha
 [0.1.0-alpha]: https://github.com/VoiceLessQ/Painite/releases/tag/v0.1.0-alpha
