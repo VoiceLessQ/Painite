@@ -61,6 +61,14 @@ jobs:
     steps:
       - name: checkout
         uses: actions/checkout@v4
+      - name: no network or process access (SECURITY.md)
+        shell: bash
+        run: |
+          fail=0
+          if git grep -n -E 'std::net|TcpStream|UdpSocket|Command::new|process::Command' -- 'rust/**/*.rs'; then fail=1; fi
+          if git grep -n -E 'java\.net\.|ProcessBuilder|Runtime\.getRuntime\(\)\.exec|HttpClient' -- 'src/**/*.java'; then fail=1; fi
+          if grep -n -E '^name = "(reqwest|hyper|ureq|curl|tokio|openssl|native-tls|rustls)"' Cargo.lock; then fail=1; fi
+          if [ "$fail" = 1 ]; then echo "::error::network or process access found, see SECURITY.md"; exit 1; fi
       - name: cargo clippy (deny-level lints gate the build, tests included)
         shell: bash
         run: |
@@ -176,6 +184,9 @@ jobs:
         with:
           name: native-macos
           path: src/main/resources/assets/painite/natives/macos
+      - name: natives import no network or process symbols (SECURITY.md)
+        shell: bash
+        run: python3 tools/check_natives.py src/main/resources/assets/painite/natives --expect 6
       - name: assemble jar (skip rust build — natives already placed)
         shell: bash
         run: ./gradlew build -x buildRustLib -x copyRustDll
@@ -190,6 +201,10 @@ jobs:
   # (always describes what shipped at that version). Pre-release flag is
   # auto-set if the tag name contains "alpha" or "beta".
   #
+  # Each jar gets a SHA256SUMS entry attached to the release and a signed
+  # build provenance attestation. Verify a download with
+  #   gh attestation verify painite-<version>.jar --owner VoiceLessQ
+  #
   # Bypass: don't push a tag and this job never runs. Manual releases
   # via the web UI still work the same way.
   release:
@@ -198,6 +213,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: checkout (need README.md at tag commit)
         uses: actions/checkout@v4
@@ -206,11 +223,20 @@ jobs:
         with:
           name: Artifacts
           path: jars/
+      - name: write SHA256SUMS
+        shell: bash
+        run: cd jars && sha256sum painite-*.jar | tee SHA256SUMS
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: jars/painite-*.jar
       - name: publish release
         uses: softprops/action-gh-release@v2
         with:
           name: "Painite ${{ github.ref_name }}"
           body_path: README.md
-          files: jars/painite-*.jar
+          files: |
+            jars/painite-*.jar
+            jars/SHA256SUMS
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
           fail_on_unmatched_files: true

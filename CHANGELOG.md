@@ -22,6 +22,12 @@ of 2x21 chunks at one per second.
   terrain fill takes about 6% less CPU and the surface pass about 2%,
   with the same blocks out. `-Dpainite.nativeV3=false` keeps the
   baseline build.
+- Releases carry a `SHA256SUMS` file and a signed build provenance
+  attestation (`gh attestation verify`). SECURITY.md says what the
+  native does and how to build and check it on each platform. CI
+  fails the build if network or process-spawning code shows up in the
+  sources or in the import tables of the built natives
+  (`tools/check_natives.py`).
 
 ### Changed
 
@@ -50,9 +56,6 @@ of 2x21 chunks at one per second.
   water.
 - Far-view records refreshed from finished chunks sat one block low
   and showed the block under the surface.
-
-### Fixed
-
 - The feature gate kept a grant record per chunk for the life of the
   server, growing without bound; it is now kept in test builds only.
 
